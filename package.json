@@ -1,0 +1,36 @@
+{
+  "name": "@terragon/pipeline",
+  "version": "0.0.1",
+  "description": "Data aggregator",
+  "main": "index.js",
+  "scripts": {
+    "build-ts": "tsc",
+    "start": "npm run serve",
+    "serve": "node dist/server.js",
+    "watch-node": "nodemon dist/server.js",
+    "watch-ts": "tsc -w",
+    "types": "ts-interface-builder src/types.ts",
+    "dev": "COUCH_USER=guest COUCH_PASS=guest COUCH_PORT=5984 COUCH_HOST=10.0.0.115 node dist/server.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/terragon-social-club/pipeline.git"
+  },
+  "author": "Mike Keen",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/terragon-social-club/pipeline/issues"
+  },
+  "homepage": "https://github.com/terragon-social-club/pipeline#readme",
+  "devDependencies": {
+    "@types/node": "^13.5.0",
+    "nodemon": "^1.19.4",
+    "ts-interface-builder": "^0.1.8",
+    "tslint": "^5.20.1",
+    "typescript": "^3.7.5"
+  },
+  "dependencies": {
+    "@mkeen/rxcouch": "^3.8.4",
+    "rxjs": "^6.5.4"
+  }
+}
