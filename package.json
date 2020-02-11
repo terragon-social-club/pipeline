@@ -23,14 +23,14 @@
   },
   "homepage": "https://github.com/terragon-social-club/pipeline#readme",
   "devDependencies": {
-    "@types/node": "^13.5.1",
+    "@types/node": "^13.7.0",
     "nodemon": "^1.19.4",
     "ts-interface-builder": "^0.1.8",
     "tslint": "^5.20.1",
     "typescript": "^3.7.5"
   },
   "dependencies": {
-    "@mkeen/rxcouch": "file:../../rxcouch",
+    "@mkeen/rxcouch": "^4.0.1",
     "rxjs": "^6.5.4"
   }
 }

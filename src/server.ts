@@ -1,6 +1,6 @@
 import { of, Observable, Observer, pipe, zip, queueScheduler, Subject, BehaviorSubject } from 'rxjs';
 import { filter, take, tap, takeUntil, last, buffer } from 'rxjs/operators';
-import { CouchDB, AuthorizationBehavior, CouchDBCredentials } from '@mkeen/rxcouch';
+import { CouchDB, AuthorizationBehavior, CouchDBCredentials, CouchSession } from '@mkeen/rxcouch';
 import { CouchDBChanges, CouchDBDocument } from '@mkeen/rxcouch/dist/types';
 
 const { COUCH_HOST, COUCH_PASS, COUCH_USER, COUCH_PORT, COUCH_SSL } = process.env;
@@ -9,6 +9,12 @@ const credentials: Observable<CouchDBCredentials> = of({
   username: COUCH_USER,
   password: COUCH_PASS
 });
+
+const couchSession: CouchSession = new CouchSession(
+  AuthorizationBehavior.cookie,
+  `${COUCH_SSL? 'https://' : 'http://'}${COUCH_HOST}:${COUCH_PORT}/_session`,
+  credentials
+);
 
 const ingressCommentsDb = new CouchDB(
   {
@@ -19,11 +25,10 @@ const ingressCommentsDb = new CouchDB(
     trackChanges: false
   },
 
-  AuthorizationBehavior.cookie,
-  credentials
+  couchSession
 );
 
-const commentsAgrregateDb = new CouchDB(
+const commentsAggregateDb = new CouchDB(
   {
     dbName: 'comments',
     host: COUCH_HOST,
@@ -32,8 +37,7 @@ const commentsAgrregateDb = new CouchDB(
     trackChanges: false
   },
 
-  AuthorizationBehavior.cookie,
-  credentials
+  couchSession
 );
 
 const ingressCommentReactionsDb = new CouchDB(
@@ -45,8 +49,19 @@ const ingressCommentReactionsDb = new CouchDB(
     trackChanges: false
   },
 
-  AuthorizationBehavior.cookie,
-  credentials
+  couchSession
+);
+
+const feedsDb = new CouchDB(
+  {
+    dbName: 'feeds',
+    host: COUCH_HOST,
+    port: parseInt(COUCH_PORT),
+    ssl: COUCH_SSL === 'true' ? true : false,
+    trackChanges: false
+  },
+
+  couchSession
 );
 
 function changes(database: CouchDB, observer: Observer<any>, first_seq?: string) {
@@ -54,16 +69,11 @@ function changes(database: CouchDB, observer: Observer<any>, first_seq?: string)
   database.changes() // need to be able to pass `first_seq` here to start changes from our last known
     .pipe(takeUntil(reconnect))
     .subscribe((change) => {
+      console.log("got change", change)
       observer.next(change);
-    }, (err) => {
-      const last_seq = err.last_seq;
-      if(err.errorCode == 200) {
-        changes(database, observer, last_seq);
-        reconnect.next(true);
-      } else {
-        throw err;
-      }
-
+    }, err => err, () => {
+      changes(database, observer);
+      reconnect.next(true);
     });
 
 }
@@ -71,11 +81,12 @@ function changes(database: CouchDB, observer: Observer<any>, first_seq?: string)
 const ingressComments = Observable.create((observer: Observer<CouchDBChanges>) => changes(ingressCommentsDb, observer));
 const ingressCommentReactions = Observable.create((observer: Observer<CouchDBChanges>) => changes(ingressCommentReactionsDb, observer));
 
-const savingBatch = new BehaviorSubject(false);
+const savingCommentsBatch = new BehaviorSubject(false);
 ingressComments
-  .pipe(buffer(savingBatch))
+  .pipe(buffer(savingCommentsBatch))
   .subscribe((changes: CouchDBChanges[]) => {
     if (changes.length) {
+      console.log("got comment chanfges", changes)
       const newMessages: any = {};
       changes.forEach(({ doc }) => {
         const { content, conversation_id, sender_id } = doc;
@@ -83,6 +94,8 @@ ingressComments
         if(!newMessages[conversation_id]) {
           newMessages[conversation_id] = [];
         }
+
+        console.log(doc, "changed")
 
         newMessages[conversation_id].push({
           reactions: {
@@ -95,35 +108,40 @@ ingressComments
           content,
           sender_id
         });
-        
+
       });
 
       const conversation_get_observables: Observable<CouchDBDocument>[] = [];
       const conversation_update_observables: Observable<CouchDBDocument>[] = [];
 
       Object.keys(newMessages).forEach((conversation_id) => {
-        conversation_get_observables.push(commentsAgrregateDb.doc(conversation_id))
+        console.log("new ones")
+        conversation_get_observables.push(commentsAggregateDb.doc(conversation_id))
       });
 
       zip(...conversation_get_observables)
         .pipe(take(1))
         .subscribe((existingAggregateDocuments) => {
           existingAggregateDocuments.forEach((aggregateDocument) => {
+            if(!aggregateDocument.comments) {
+              aggregateDocument.comments = [];
+            }
+
             aggregateDocument.comments = aggregateDocument.comments.concat(newMessages[aggregateDocument._id]);
-            conversation_update_observables.push(commentsAgrregateDb.doc(aggregateDocument))
+            conversation_update_observables.push(commentsAggregateDb.doc(aggregateDocument))
           });
 
           zip(...conversation_update_observables)
             .pipe(take(1))
             .subscribe((_done) => {
-              savingBatch.next(true);
+              savingCommentsBatch.next(true);
             });
 
         });
 
     } else {
       setTimeout(() => {
-        savingBatch.next(true);
+        savingCommentsBatch.next(true);
       }, 1);
 
     }
@@ -160,7 +178,7 @@ ingressCommentReactions
       const conversation_update_observables: Observable<CouchDBDocument>[] = [];
 
       Object.keys(queuedCommentReactions).forEach((conversation_id) => {
-        conversation_get_observables.push(commentsAgrregateDb.doc(conversation_id))
+        conversation_get_observables.push(commentsAggregateDb.doc(conversation_id))
       });
 
       zip(...conversation_get_observables)
@@ -174,10 +192,10 @@ ingressCommentReactions
 
             });
 
-            conversation_update_observables.push(commentsAgrregateDb.doc(aggregateDocument));
+            conversation_update_observables.push(commentsAggregateDb.doc(aggregateDocument));
           });
 
-          console.log(conversation_update_observables);
+          console.log(conversation_update_observables, "saving i think");
 
           zip(...conversation_update_observables)
             .pipe(take(1))
@@ -188,36 +206,9 @@ ingressCommentReactions
         });
 
     } else {
-      setTimeout(() => {
-        savingReactionsBatch.next(true);
-      }, 1);
-
+      savingReactionsBatch.next(true);
     }
 
   });
-
-
-/*ingressCommentsReactionsDb.changes()
-  .subscribe((commentReactionIngress) => {
-    console.log(commentReactionIngress)
-  });*/
-
-//ingressCommentsDb.doc("d2ea3d826856bafee511524cc001823f").subscribe((a) => console.log("changed", a))
-
-/*feedsDb.doc('hot')
-  .subscribe((hotFeed => {
-    hotFeed.links.map((link: any) => {
-      commentsDb.doc({_id: link.slug, title: link.title, url: link.url, badges: link.badges})
-      .pipe(take(1))
-      .subscribe((doc) => {
-        console.log("doc exists");
-      }, (err) => {
-        console.log("Errrrr")
-      }, () => {
-        console.log("ended")
-      });
-    });
-
-  }));*/
 
 process.stdin.resume();
