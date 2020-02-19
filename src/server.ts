@@ -1,5 +1,5 @@
-import { of, Observable, Observer, pipe, zip, queueScheduler, Subject, BehaviorSubject } from 'rxjs';
-import { filter, take, tap, takeUntil, last, buffer } from 'rxjs/operators';
+import { of, Observable, Observer, pipe, zip, queueScheduler, Subject, BehaviorSubject, concat } from 'rxjs';
+import { filter, take, tap, takeUntil, last, buffer, map, mergeMap, catchError, finalize } from 'rxjs/operators';
 import { CouchDB, AuthorizationBehavior, CouchDBCredentials, CouchSession } from '@mkeen/rxcouch';
 import { CouchDBChanges, CouchDBDocument } from '@mkeen/rxcouch/dist/types';
 
@@ -34,7 +34,7 @@ const commentsAggregateDb = new CouchDB(
     host: COUCH_HOST,
     port: parseInt(COUCH_PORT),
     ssl: COUCH_SSL === 'true' ? true : false,
-    trackChanges: false
+    trackChanges: true
   },
 
   couchSession
@@ -58,7 +58,7 @@ const feedsDb = new CouchDB(
     host: COUCH_HOST,
     port: parseInt(COUCH_PORT),
     ssl: COUCH_SSL === 'true' ? true : false,
-    trackChanges: false
+    trackChanges: true
   },
 
   couchSession
@@ -69,9 +69,10 @@ function changes(database: CouchDB, observer: Observer<any>, first_seq?: string)
   database.changes() // need to be able to pass `first_seq` here to start changes from our last known
     .pipe(takeUntil(reconnect))
     .subscribe((change) => {
-      console.log("got change", change)
       observer.next(change);
-    }, err => err, () => {
+    }, (err) => {
+      //console.log("Error occurred")
+    }, () => {
       changes(database, observer);
       reconnect.next(true);
     });
@@ -86,7 +87,7 @@ ingressComments
   .pipe(buffer(savingCommentsBatch))
   .subscribe((changes: CouchDBChanges[]) => {
     if (changes.length) {
-      console.log("got comment chanfges", changes)
+      //console.log("got comment chanfges", changes)
       const newMessages: any = {};
       changes.forEach(({ doc }) => {
         const { content, conversation_id, sender_id } = doc;
@@ -95,7 +96,7 @@ ingressComments
           newMessages[conversation_id] = [];
         }
 
-        console.log(doc, "changed")
+        //console.log(doc, "changed")
 
         newMessages[conversation_id].push({
           reactions: {
@@ -115,28 +116,25 @@ ingressComments
       const conversation_update_observables: Observable<CouchDBDocument>[] = [];
 
       Object.keys(newMessages).forEach((conversation_id) => {
-        console.log("new ones")
-        conversation_get_observables.push(commentsAggregateDb.doc(conversation_id))
-      });
-
-      zip(...conversation_get_observables)
-        .pipe(take(1))
-        .subscribe((existingAggregateDocuments) => {
-          existingAggregateDocuments.forEach((aggregateDocument) => {
+        conversation_get_observables.push(
+          commentsAggregateDb.doc(conversation_id).pipe(take(1), mergeMap((aggregateDocument) => {
             if(!aggregateDocument.comments) {
               aggregateDocument.comments = [];
             }
 
             aggregateDocument.comments = aggregateDocument.comments.concat(newMessages[aggregateDocument._id]);
-            conversation_update_observables.push(commentsAggregateDb.doc(aggregateDocument))
-          });
 
-          zip(...conversation_update_observables)
-            .pipe(take(1))
-            .subscribe((_done) => {
-              savingCommentsBatch.next(true);
-            });
+            return commentsAggregateDb.doc(aggregateDocument).pipe(take(1));
+          }))
 
+        )
+
+      });
+
+      zip(...conversation_get_observables)
+        .pipe(take(1))
+        .subscribe((_existing) => {
+          savingCommentsBatch.next(true);
         });
 
     } else {
@@ -154,6 +152,7 @@ ingressCommentReactions
   .subscribe((changes: CouchDBChanges[]) => {
     if (changes.length) {
       const queuedCommentReactions: any = {}
+      const commentIndexes: number[] = [];
 
       changes.forEach(({ doc }) => {
         if (!queuedCommentReactions[doc.conversation_id]) {
@@ -172,43 +171,62 @@ ingressCommentReactions
           queuedCommentReactions[doc.conversation_id][doc.reactionType][doc.commentIndex]++;
         }
 
+        commentIndexes.push(doc.commentIndex);
       });
 
       const conversation_get_observables: Observable<CouchDBDocument>[] = [];
       const conversation_update_observables: Observable<CouchDBDocument>[] = [];
 
       Object.keys(queuedCommentReactions).forEach((conversation_id) => {
-        conversation_get_observables.push(commentsAggregateDb.doc(conversation_id))
-      });
+        conversation_get_observables.push(
+          commentsAggregateDb.doc(conversation_id).pipe(take(1), mergeMap((currentConvo: any) => {
+            commentIndexes.forEach((commentIndex) => {
+              Object.keys(currentConvo.comments[commentIndex].reactions).forEach((reactionType) => {
+                //console.log(queuedCommentReactions[conversation_id][reactionType][commentIndex])
+                if (queuedCommentReactions[conversation_id][reactionType][commentIndex] !== undefined) {
+                  currentConvo.comments[commentIndex].reactions[reactionType] = currentConvo.comments[commentIndex].reactions[reactionType] + queuedCommentReactions[conversation_id][reactionType][commentIndex]
+                }
 
-      zip(...conversation_get_observables)
-        .pipe(take(1))
-        .subscribe((existingAggregateDocuments) => {
-          existingAggregateDocuments.forEach((aggregateDocument) => {
-            Object.keys(queuedCommentReactions[aggregateDocument._id]).forEach((reactionType: string) => {
-              Object.keys(queuedCommentReactions[aggregateDocument._id][reactionType]).forEach((commentIndex: string) => {
-                aggregateDocument.comments[commentIndex].reactions[reactionType] = aggregateDocument.comments[commentIndex].reactions[reactionType] + queuedCommentReactions[aggregateDocument._id][reactionType][commentIndex];
               });
 
             });
 
-            conversation_update_observables.push(commentsAggregateDb.doc(aggregateDocument));
-          });
+            return commentsAggregateDb.doc(currentConvo).pipe(take(1));
+          }))
 
-          console.log(conversation_update_observables, "saving i think");
+        );
 
-          zip(...conversation_update_observables)
-            .pipe(take(1))
-            .subscribe((_done) => {
-              savingReactionsBatch.next(true);
-            });
+      });
 
+      concat(...conversation_get_observables)
+        .pipe(take(1), finalize(() => {
+          savingReactionsBatch.next(true);
+        }))
+        .subscribe((existingAggregateDocuments) => {
+          //console.log("docs written");
         });
 
     } else {
-      savingReactionsBatch.next(true);
+      setTimeout(() => {
+        savingReactionsBatch.next(true);
+      }, 1);
+
     }
 
   });
+
+feedsDb.doc('hot').subscribe(hotFeed => {
+  hotFeed.links.map((link: any) => {
+    commentsAggregateDb.doc({_id: link.slug, title: link.title, url: link.url, badges: link.badges})
+    .pipe(take(1))
+    .subscribe((doc) => {
+      console.log("created comments doc");
+    }, (err) => {
+      console.log("doc exists")
+    });
+
+  });
+
+});
 
 process.stdin.resume();

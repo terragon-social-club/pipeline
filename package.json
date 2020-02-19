@@ -1,6 +1,6 @@
 {
   "name": "@terragon/pipeline",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "Data aggregator",
   "main": "index.js",
   "scripts": {
@@ -30,7 +30,7 @@
     "typescript": "^3.7.5"
   },
   "dependencies": {
-    "@mkeen/rxcouch": "^4.0.1",
+    "@mkeen/rxcouch": "^4.1.1",
     "rxjs": "^6.5.4"
   }
 }
